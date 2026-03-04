@@ -1,0 +1,20 @@
+[
+    {
+        "query": "What specific metric did they mention regarding the fine-tuning project's improvement percentage?",
+        "ground_truth_answer": "Faithfulness (Groundedness) was the metric targeted for improvement, with a goal of >90%.",
+        "ground_truth_chunk_ids": ["chunk_idx_0"],
+        "expected_recall": 1
+    },
+    {
+        "query": "Compare the latency trade-offs mentioned between the Local Model project and the Real-Time Multimodal app. Which one prioritized speed more?",
+        "ground_truth_answer": "Latency is a key metric for the system overall, with a goal of <3 seconds (p95), but no explicit comparison between the Local Model and Real-Time Multimodal projects was found in the context.",
+        "ground_truth_chunk_ids": ["chunk_idx_1"],
+        "expected_recall": 0
+    },
+    {
+        "query": "What did the speaker say about using OpenAI's GPT-4 for this project?",
+        "ground_truth_answer": "The context does not mention OpenAI's GPT-4; the models discussed are Gemini-based.",
+        "ground_truth_chunk_ids": [],
+        "expected_recall": 0
+    }
+]
