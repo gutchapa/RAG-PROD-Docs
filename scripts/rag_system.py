@@ -4,11 +4,11 @@ import sys
 from langchain_community.document_loaders import TextLoader
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-# from langchain_chroma import Chroma  <-- Removed
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
+from secrets_loader import get_google_api_key
 
 # Note: In 0.3, Chroma moved to langchain-chroma package usually, 
 # but if not installed, fallback to community.
@@ -17,56 +17,54 @@ try:
 except ImportError:
     from langchain_community.vectorstores import Chroma
 
-# Set your API key
-# Best Practice: Read from environment variable, do not hardcode!
-if not os.environ.get("GOOGLE_API_KEY"):
-    print("❌ Error: GOOGLE_API_KEY environment variable not set.")
-    print("Usage: GOOGLE_API_KEY='your_key' python3 rag_system.py")
-    sys.exit(1)
+# Set your API key securely
+os.environ["GOOGLE_API_KEY"] = get_google_api_key()
 
 def main():
     print("--- 📚 RAG System Starting (Semantic Mode - Modern) ---")
     
-    # 1. Load Data
-    try:
-        loader = TextLoader("/root/.openclaw/workspace/downloads/clean_transcript.txt")
-        docs = loader.load()
-        print(f"Loaded {len(docs)} document(s).")
-    except Exception as e:
-        print(f"Error loading document: {e}")
-        return
-
-    # 2. Split Text (SEMANTIC CHUNKING!) 🧠
-    print("Initializing Semantic Chunker (this uses embeddings)...")
+    # Setup Embeddings
     embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-    
-    # Using 'percentile' threshold to find meaningful breaks
-    text_splitter = SemanticChunker(
-        embeddings,
-        breakpoint_threshold_type="percentile"
-    )
-    
-    try:
-        splits = text_splitter.split_documents(docs)
-        print(f"Split into {len(splits)} semantic chunks.")
-    except Exception as e:
-        print(f"Error splitting text: {e}")
-        return
+    vectorstore = None
+    persist_directory = "./chroma_db_semantic_v3"
 
-    # 3. Store (ChromaDB)
-    print("Creating vector store...")
-    try:
-        vectorstore = Chroma.from_documents(
-            documents=splits, 
-            embedding=embeddings,
-            persist_directory="./chroma_db_semantic_v3"
-        )
-        print("Vector store created successfully.")
-    except Exception as e:
-        print(f"Error creating vector store: {e}")
-        return
+    # 1. Load Existing Vector Store (if available)
+    if os.path.exists(persist_directory) and os.path.isdir(persist_directory) and os.listdir(persist_directory):
+        print("✅ Loading existing vector store from disk...")
+        try:
+            vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
+        except Exception as e:
+            print(f"⚠️ Failed to load existing store: {e}. Recreating...")
+            vectorstore = None
+    
+    # 2. Recreate if needed
+    if not vectorstore:
+        print("⚠️ No valid store found. Creating new vector store...")
+        try:
+            loader = TextLoader("/root/.openclaw/workspace/downloads/clean_transcript.txt")
+            docs = loader.load()
+            print(f"Loaded {len(docs)} document(s).")
+            
+            print("Initializing Semantic Chunker (this uses embeddings)...")
+            text_splitter = SemanticChunker(
+                embeddings,
+                breakpoint_threshold_type="percentile"
+            )
+            splits = text_splitter.split_documents(docs)
+            print(f"Split into {len(splits)} semantic chunks.")
+            
+            print("Creating vector store...")
+            vectorstore = Chroma.from_documents(
+                documents=splits, 
+                embedding=embeddings,
+                persist_directory=persist_directory
+            )
+            print("Vector store created successfully.")
+        except Exception as e:
+            print(f"❌ Critical Error creating vector store: {e}")
+            return
 
-    # 4. Retrieval & Chat
+    # 3. Retrieval & Chat
     llm = ChatGoogleGenerativeAI(
         model="models/gemini-2.0-flash", 
         temperature=0,
@@ -76,6 +74,7 @@ def main():
     # Modern Prompt Template (No System Role, just Human to avoid errors)
     prompt = ChatPromptTemplate.from_messages([
         ("human", """You are a helpful assistant. Use the following context to answer the question.
+        If the answer is not in the context, say "I don't know" or "The context does not mention this."
         
         Context:
         {context}
@@ -85,10 +84,10 @@ def main():
     ])
 
     document_chain = create_stuff_documents_chain(llm, prompt)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
     retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
-    # 5. Interactive Loop
+    # 4. Interactive Loop
     print("\n--- 🤖 Semantic RAG Ready! (Type 'exit' to quit) ---")
     
     if len(sys.argv) > 1:
