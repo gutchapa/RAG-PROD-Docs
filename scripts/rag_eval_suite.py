@@ -4,16 +4,19 @@ import statistics
 import json
 from secrets_loader import get_google_api_key
 
-# LangChain Imports
+# LangChain Imports - Updated for your environment
 from langchain_community.document_loaders import TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter # Changed Splitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableConfig
+import shutil
+import langfuse
+from ragas import evaluate
+from ragas.metrics import Faithfulness, AnswerRelevancy, AnswerCorrectness, ContextPrecision
 
 try:
     from langchain_chroma import Chroma
@@ -28,12 +31,13 @@ GT_FILE = "/root/.openclaw/workspace/RAG_GROUND_TRUTH.json"
 
 class RAGEvaluator:
     def __init__(self):
+        print("DEBUG: Initializing RAGEvaluator...")
         self.results = []
         self.latencies = []
         
         # Setup RAG Pipeline
         self.embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-        persist_directory = "./chroma_db_semantic_v3"
+        persist_directory = "/root/.openclaw/workspace/chroma_db_semantic_v3"
         
         if os.path.exists(persist_directory) and os.listdir(persist_directory):
             print("✅ Loading existing vector store...")
@@ -42,11 +46,9 @@ class RAGEvaluator:
             print("⚠️ Recreating vector store (one-time setup)...")
             loader = TextLoader("/root/.openclaw/workspace/downloads/clean_transcript.txt")
             docs = loader.load()
-            # TUNE: Switched to fixed-size chunking (500 chars, 50 overlap) to improve signal-to-noise (Relevancy)
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
             splits = text_splitter.split_documents(docs)
             
-            # ADDING METADATA FOR PRECISION/RECALL CALCULATION
             indexed_splits = []
             for i, doc in enumerate(splits):
                 doc.metadata['id'] = f"chunk_idx_{i}"
@@ -55,7 +57,7 @@ class RAGEvaluator:
             self.vectorstore = Chroma.from_documents(documents=indexed_splits, embedding=self.embeddings, persist_directory=persist_directory)
 
         self.llm = ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0, convert_system_message_to_human=True)
-        self.judge_llm = ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0) # Judge
+        self.judge_llm = ChatGoogleGenerativeAI(model="models/gemini-2.0-flash", temperature=0)
 
         # RAG Chain
         prompt = ChatPromptTemplate.from_messages([
@@ -68,53 +70,58 @@ class RAGEvaluator:
             Question: {input}
             """)
         ])
-        document_chain = create_stuff_documents_chain(self.llm, prompt)
-        retriever = self.vectorstore.as_retriever(search_kwargs={"k": 20}) # Enhanced recall
-        self.retrieval_chain = create_retrieval_chain(retriever, document_chain)
+        
+        # Use simple document chain
+        self.document_chain = create_stuff_documents_chain(self.llm, prompt)
+        self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": 20})
 
         # Load Ground Truth Data
         with open(GT_FILE, 'r') as f:
             self.ground_truth = json.load(f)
+        print("DEBUG: RAGEvaluator initialized.")
 
     def calculate_semantic_similarity(self, text1, text2):
-        """Calculates cosine similarity between two texts using the configured embeddings."""
         if not text1 or not text2:
             return 0.0
         try:
             embeddings = self.embeddings.embed_documents([text1, text2])
-            # Simple dot product for normalized embeddings = cosine similarity
             sim = sum(e1 * e2 for e1, e2 in zip(embeddings[0], embeddings[1]))
             return sim
         except Exception as e:
             print(f"⚠️ Semantic Similarity Failed: {e}")
             return 0.0
 
-    def evaluate_query(self, gt_entry):
+    def evaluate_query(self, gt_entry, run_config=None):
         query = gt_entry['query']
-        time.sleep(2)  # Rate Limit Protection
+        time.sleep(2)
         print(f"\n🧪 Testing: '{query}'")
         start_time = time.time()
         
-        # 1. Run RAG
-        result = self.retrieval_chain.invoke({"input": query})
+        print("DEBUG: Step 1 - Retrieving documents...")
+        # CRITICAL: Passing string directly to retriever to avoid dictionary errors
+        retrieved_docs = self.retriever.invoke(query)
+        retrieved_content = "\n".join([doc.page_content for doc in retrieved_docs])
+        print(f"DEBUG: Step 1 complete. Retrieved {len(retrieved_docs)} docs.")
+        
+        print("DEBUG: Step 2 - Generating answer...")
+        # CRITICAL: Passing correct dictionary to document chain
+        answer = self.document_chain.invoke({
+            "input": query,
+            "context": retrieved_docs
+        }, config=run_config)
+        print("DEBUG: Step 2 complete.")
+        
         end_time = time.time()
         latency = end_time - start_time
         
-        answer = result['answer']
-        retrieved_docs = result['context']
-        retrieved_content = "\n".join([doc.page_content for doc in retrieved_docs])
+        print("DEBUG: Step 3 - Running judge metrics...")
+        scores = self.run_judge(query, answer, retrieved_content, run_config)
+        print("DEBUG: Step 3 complete.")
         
-        # --- METRIC CALCULATION (LLM-as-a-Judge) ---
-        scores = self.run_judge(query, answer, retrieved_content)
-        
-        # --- METRIC CALCULATION (Semantic/Correctness) ---
         gt_answer = gt_entry.get('ground_truth_answer', '')
         semantic_similarity = self.calculate_semantic_similarity(answer, gt_answer)
         
-        # --- METRIC CALCULATION (Context Metrics) ---
         context_recall_proxy = scores['recall'] 
-        
-        # Context Precision: How much of retrieved context is relevant? 
         retrieved_ids = {doc.metadata.get('id') for doc in retrieved_docs if doc.metadata.get('id')}
         truth_ids = set(gt_entry.get('ground_truth_chunk_ids', [])) 
         
@@ -124,32 +131,24 @@ class RAGEvaluator:
         else:
             context_precision = 1.0
         
-        # Answer Correctness: Is the answer factually correct vs ground truth?
-        answer_correctness = self.judge_answer_correctness(query, answer, gt_answer)
+        answer_correctness = self.judge_answer_correctness(query, answer, gt_answer, run_config)
+        context_relevancy = self.judge_context_relevancy(query, retrieved_content, run_config)
 
-        # --- METRIC 9: Context Relevancy ---
-        context_relevancy = self.judge_context_relevancy(query, retrieved_content)
-
-        # 3. Calculate Cost
-        input_tokens = len(query + retrieved_content) / 4 # Est.
-        output_tokens = len(answer) / 4 # Est.
+        input_tokens = len(query + retrieved_content) / 4
+        output_tokens = len(answer) / 4
         cost = (input_tokens/1e6 * COST_PER_1M_INPUT) + (output_tokens/1e6 * COST_PER_1M_OUTPUT)
         
         self.results.append({
             "query": query,
             "answer": answer,
             "latency": latency,
-            # LLM Judge Metrics (3)
             "faithfulness": scores['faithfulness'],
             "relevance": scores['relevance'],
             "context_recall_proxy": context_recall_proxy,
-            # Semantic/Correctness Metrics (3)
             "answer_correctness": answer_correctness,
             "semantic_similarity": semantic_similarity,
-            # Context Metrics (2)
             "context_precision": context_precision,
             "context_relevancy": context_relevancy,
-            # Efficiency Metrics (2)
             "cost": cost,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens
@@ -166,8 +165,7 @@ class RAGEvaluator:
         print(f"   💡 Context Relevancy: {context_relevancy:.2f}/1")
         return self.results[-1]
 
-    def run_judge(self, query, answer, context):
-        # Judge Prompt for Faithfulness, Relevance, Recall Proxy
+    def run_judge(self, query, answer, context, run_config=None):
         judge_prompt = f"""
         You are an AI Evaluator. Evaluate the following RAG interaction.
         
@@ -183,15 +181,14 @@ class RAGEvaluator:
         JSON only:
         """
         try:
-            response = self.judge_llm.invoke(judge_prompt, config=RunnableConfig(configurable={"system_instruction": "You are a concise JSON evaluation engine."}))
+            response = self.judge_llm.invoke(judge_prompt, config=run_config)
             content = response.content.replace("```json", "").replace("```", "").strip()
             return json.loads(content)
         except Exception as e:
             print(f"⚠️ Judge Failed (3-Metric): {e}")
             return {"faithfulness": 0, "relevance": 0, "recall": 0}
             
-    def judge_answer_correctness(self, query, answer, gt_answer):
-        """LLM-as-a-Judge to compare generated answer vs ground truth answer."""
+    def judge_answer_correctness(self, query, answer, gt_answer, run_config=None):
         judge_prompt = f"""
         Compare the 'Generated Answer' to the 'Ground Truth Answer' based on the 'Query'.
         
@@ -204,15 +201,14 @@ class RAGEvaluator:
         Return only the float score. Do not include any text, JSON, or explanation.
         """
         try:
-            response = self.judge_llm.invoke(judge_prompt, config=RunnableConfig(configurable={"system_instruction": "You are a concise float output engine."}))
+            response = self.judge_llm.invoke(judge_prompt, config=run_config)
             content = response.content.strip()
             return float(content)
         except Exception as e:
             print(f"⚠️ Judge Failed (Correctness): {e}")
             return 0.0
 
-    def judge_context_relevancy(self, query, context):
-        """LLM-as-a-Judge to score context relevancy (Signal-to-Noise)."""
+    def judge_context_relevancy(self, query, context, run_config=None):
         judge_prompt = f"""
         Context: {context[:4000]}...
         Query: {query}
@@ -222,7 +218,7 @@ class RAGEvaluator:
         Return only the float score. Do not include any text, JSON, or explanation.
         """
         try:
-            response = self.judge_llm.invoke(judge_prompt, config=RunnableConfig(configurable={"system_instruction": "You are a concise float output engine."}))
+            response = self.judge_llm.invoke(judge_prompt, config=run_config)
             content = response.content.strip()
             return float(content)
         except Exception as e:
@@ -234,12 +230,8 @@ class RAGEvaluator:
         
         count = len(self.results)
         avg_latency = statistics.mean(self.latencies)
-        p50 = statistics.median(self.latencies)
-        p95 = sorted(self.latencies)[int(len(self.latencies) * 0.95)] if len(self.latencies) > 1 else self.latencies[0]
-        
         total_cost = sum(r['cost'] for r in self.results)
         
-        # Aggregated Metrics (Total 9)
         avg_faithfulness = statistics.mean(r['faithfulness'] for r in self.results)
         avg_relevance = statistics.mean(r['relevance'] for r in self.results)
         avg_context_precision = statistics.mean(r['context_precision'] for r in self.results)
@@ -255,7 +247,6 @@ class RAGEvaluator:
         print(f"Total Cost:       ${total_cost:.6f}")
         print(f"\n--- PERFORMANCE ---")
         print(f"Latency (Avg):    {avg_latency:.2f}s")
-        print(f"Latency (P95):    {p95:.2f}s")
         print(f"\n--- QUALITY ---")
         print(f"1. Faithfulness:         {avg_faithfulness*100:.1f}%")
         print(f"2. Answer Relevance:     {avg_relevance*100:.1f}%")
@@ -271,18 +262,38 @@ class RAGEvaluator:
 
 
 def main():
-    # Ensure the ground truth file exists before loading
     if not os.path.exists(GT_FILE):
         print(f"FATAL: Ground Truth file not found at {GT_FILE}. Cannot run full evaluation.")
         return
         
+    try:
+        if os.environ.get("LANGFUSE_HOST") and os.environ.get("LANGFUSE_SECRET_KEY"):
+            langfuse.init(host=os.environ["LANGFUSE_HOST"], secret_key=os.environ["LANGFUSE_SECRET_KEY"])
+            print("✅ Langfuse tracing initialized.")
+        else:
+            print("⚠️ Langfuse keys not found in environment. Tracing skipped.")
+    except Exception as e:
+        print(f"⚠️ Failed to initialize Langfuse: {e}")
+
+    run_name = f"RAG_Eval_Suite_{time.strftime('%Y%m%d_%H%M%S')}"
+    run_config = RunnableConfig(
+        tags=["ragas_custom_evaluation", "gemini_flash"],
+        configurable={
+            "run_name": run_name,
+        }
+    )
+    
     evaluator = RAGEvaluator()
     
     print("🚀 Starting RAG Evaluation Suite (Full 9 Metrics Mode)...")
     for gt_entry in evaluator.ground_truth:
-        evaluator.evaluate_query(gt_entry)
+        evaluator.evaluate_query(gt_entry, run_config)
         
     evaluator.print_summary()
+    
+    if hasattr(langfuse, 'is_initialized') and langfuse.is_initialized():
+        langfuse.shutdown()
+        print("✅ Langfuse tracing finished and shutdown.")
 
 if __name__ == "__main__":
     main()
