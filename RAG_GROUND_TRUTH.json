@@ -1,20 +1,28 @@
 [
     {
-        "query": "What specific metric did they mention regarding the fine-tuning project's improvement percentage?",
-        "ground_truth_answer": "Faithfulness (Groundedness) was the metric targeted for improvement, with a goal of >90%.",
-        "ground_truth_chunk_ids": ["chunk_idx_0"],
+        "query": "What specific metrics were suggested for tracking the quality of the RAG system over time?",
+        "ground_truth_answer": "The suggested metrics are latency (at P50 and P95 percentiles), cost per request, citation coverage, and failure rate.",
+        "ground_truth_chunk_ids": [
+            "chunk_idx_29",
+            "chunk_idx_30"
+        ],
         "expected_recall": 1
     },
     {
-        "query": "Compare the latency trade-offs mentioned between the Local Model project and the Real-Time Multimodal app. Which one prioritized speed more?",
-        "ground_truth_answer": "Latency is a key metric for the system overall, with a goal of <3 seconds (p95), but no explicit comparison between the Local Model and Real-Time Multimodal projects was found in the context.",
-        "ground_truth_chunk_ids": ["chunk_idx_1"],
-        "expected_recall": 0
+        "query": "Which model does the speaker mention as an alternative to calling a powerful API locally?",
+        "ground_truth_answer": "The speaker mentions calling a powerful API like GPT 5 as an alternative to running local models like Llama 3.2 or Mistral 7B.",
+        "ground_truth_chunk_ids": [
+            "chunk_idx_18",
+            "chunk_idx_19"
+        ],
+        "expected_recall": 1
     },
     {
-        "query": "What did the speaker say about using OpenAI's GPT-4 for this project?",
-        "ground_truth_answer": "The context does not mention OpenAI's GPT-4; the models discussed are Gemini-based.",
-        "ground_truth_chunk_ids": [],
-        "expected_recall": 0
+        "query": "What model was suggested as a base for the fine-tuning project?",
+        "ground_truth_answer": "The speaker suggested using a Qwen model (specifically mentioned as quen 38B) for the fine-tuning task.",
+        "ground_truth_chunk_ids": [
+            "chunk_idx_40"
+        ],
+        "expected_recall": 1
     }
 ]
