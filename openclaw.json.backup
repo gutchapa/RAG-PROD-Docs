@@ -5,7 +5,7 @@
   },
   "env": {
     "vars": {
-      "GEMINI_API_KEY": "AIzaSyAd725kdn5cXYrEdTV2xXWHZM2is-YUx88"
+      "GEMINI_API_KEY": ""
     }
   },
   "wizard": {
